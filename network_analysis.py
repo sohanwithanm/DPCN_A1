@@ -34,6 +34,7 @@ FIG_DIR = HERE / "figures"
 
 TAU = 0.40                     # similarity threshold, per analysis.ipynb Step 2
 SEED = 42
+MIN_OVERLAP = 10               # shared answered items required to correlate a pair
 
 PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3", "#937860"]
 DOMAINS = {"T": "Technology", "E": "Education", "S": "Society", "V": "Environment"}
@@ -46,6 +47,12 @@ LIKERT = {
     "Strongly Agree": 5,
     "No Comments": 3,
 }
+
+
+def nanmean(a):
+    """Mean ignoring NaN; returns NaN for an all-NaN slice without warning."""
+    a = np.asarray(a, dtype=float)
+    return np.nan if np.isnan(a).all() else float(np.nanmean(a))
 
 
 def banner(title):
@@ -66,22 +73,31 @@ def save(fig, name):
 # Step 0: reproduce the constructed network (analysis.ipynb Steps 1-2)
 # ---------------------------------------------------------------------------
 def build_network():
+    """Reproduce analysis.ipynb Steps 1-2 (missing-data policy + similarity).
+
+    Blanks stay NaN and are never imputed; entirely blank respondents are
+    dropped; similarity is pairwise-complete Pearson correlation over the items
+    each pair both answered.
+    """
     banner("STEP 0: REPRODUCING THE CONSTRUCTED NETWORK")
 
     df = pd.read_csv(DATA_FILE)
     survey_cols = df.columns[1:]
 
-    df_numeric = df.copy()
-    for col in survey_cols:
-        df_numeric[col] = df_numeric[col].map(LIKERT)
-    df_numeric[survey_cols] = df_numeric[survey_cols].fillna(3)
+    # Step 1 of analysis.ipynb: vectorisation, blanks left as NaN
+    numeric = df[survey_cols].apply(lambda c: c.map(LIKERT))
+    answered = numeric.notna().sum(axis=1)
+    keep = (answered > 0).values
 
-    features = df_numeric[survey_cols].values
-    respondent_ids = df_numeric["id. Response ID"].values
+    features = numeric[keep].to_numpy(dtype=float)
+    respondent_ids = df["id. Response ID"].values[keep]
 
-    centered = features - features.mean(axis=1, keepdims=True)
-    sim_matrix = cosine_similarity(centered)
+    # Step 2 of analysis.ipynb: pairwise-complete Pearson, thresholded
+    sim_matrix = (pd.DataFrame(features.T)
+                  .corr(method="pearson", min_periods=MIN_OVERLAP)
+                  .to_numpy())
     np.fill_diagonal(sim_matrix, 0)
+    sim_matrix = np.nan_to_num(sim_matrix, nan=0.0)
 
     G = nx.from_numpy_array((sim_matrix >= TAU).astype(int))
     G = nx.relabel_nodes(G, {i: respondent_ids[i] for i in range(len(respondent_ids))})
@@ -90,7 +106,7 @@ def build_network():
     print(f"Reproduced network: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges "
           f"(tau = {TAU})")
     print(f"Feature matrix: {features.shape[0]} respondents x {features.shape[1]} questions")
-    if (G.number_of_nodes(), G.number_of_edges()) != (86, 893):
+    if (G.number_of_nodes(), G.number_of_edges()) != (88, 946):
         print("  WARNING: construction diverges from analysis.ipynb Step 2 "
               "- re-sync before interpreting results below.")
     else:
@@ -99,61 +115,67 @@ def build_network():
     return df, survey_cols, features, respondent_ids, sim_matrix, G
 
 
-# ---------------------------------------------------------------------------
-# Step 3: data-quality guard
-# ---------------------------------------------------------------------------
-def data_quality_guard(df, survey_cols, features, respondent_ids, G):
-    banner("STEP 3: DATA-QUALITY GUARD BEFORE ANALYSIS")
+def report_missing_data_policy(df, survey_cols, features, respondent_ids, G):
+    """Document the missing-data policy already applied in Step 0.
 
-    missing_counts = df[survey_cols].isna().sum(axis=1)
+    Policy:
+      * Blank cells are NaN. They are never imputed.
+      * A respondent who answered nothing is dropped entirely.
+      * "No Comments" is an explicit answer, so it maps to the neutral value 3.
+
+    Because the feature matrix contains NaN, cosine similarity cannot be used.
+    Similarity is pairwise-complete Pearson correlation: each pair is correlated
+    over only the items BOTH answered, each vector centred on that shared subset.
+    On complete rows this is identical to mean-centred cosine similarity, so the
+    policy affects only the incomplete rows - which is the point.
+    """
+    banner("STEP 3: MISSING-DATA POLICY (NaN, NO IMPUTATION)")
+
     n_items = len(survey_cols)
+    raw_answered = df[survey_cols].notna().sum(axis=1)
 
     print("Response completeness across all 96 respondents")
-    print(f"  fully complete (0 blanks) : {(missing_counts == 0).sum()}")
-    print(f"  partial (1-30 blanks)     : {((missing_counts > 0) & (missing_counts <= 30)).sum()}")
-    print(f"  severe (>30 blanks)       : {(missing_counts > 30).sum()}")
-    print(f"  entirely blank (60)       : {(missing_counts == 60).sum()}")
-    print(f"\nTotal imputed cells: {missing_counts.sum()} of {96 * n_items} "
-          f"({100 * missing_counts.sum() / (96 * n_items):.1f}%)")
+    print(f"  fully complete ({n_items} answered) : {(raw_answered == n_items).sum()}")
+    print(f"  partial (1-{n_items - 1} answered)      : "
+          f"{((raw_answered > 0) & (raw_answered < n_items)).sum()}")
+    print(f"  entirely blank (0 answered)  : {(raw_answered == 0).sum()}")
+    print(f"\nBlank cells: {int(df[survey_cols].isna().sum().sum())} of {96 * n_items} "
+          f"({100 * df[survey_cols].isna().sum().sum() / (96 * n_items):.1f}%) "
+          f"- left as NaN, not imputed")
 
-    id_to_index = {rid: i for i, rid in enumerate(respondent_ids)}
-    raw_communities = sorted(nx.community.louvain_communities(G, seed=SEED),
-                             key=len, reverse=True)
+    empty_ids = [int(r) for r in df["id. Response ID"][raw_answered == 0]]
+    print(f"\nDropped as entirely blank: {empty_ids}")
 
-    print("\nLouvain communities on the Step 2 graph, by mean non-response:")
-    for k, comm in enumerate(raw_communities):
-        blanks = [missing_counts.iloc[id_to_index[r]] for r in comm]
-        print(f"  community {k}: size {len(comm):>2}   mean blanks {np.mean(blanks):5.1f}   "
-              f"max {max(blanks)}")
+    present = ~np.isnan(features)
+    overlap = present.astype(int) @ present.astype(int).T
+    iu = np.triu_indices(len(features), k=1)
+    print(f"\nPairwise-complete overlap (shared answered items) across "
+          f"{len(overlap[iu])} pairs:")
+    print(f"  min {overlap[iu].min()}, median {int(np.median(overlap[iu]))}, "
+          f"max {overlap[iu].max()}")
+    print(f"  pairs below the MIN_OVERLAP={MIN_OVERLAP} floor (similarity forced to 0): "
+          f"{(overlap[iu] < MIN_OVERLAP).sum()}")
 
-    print("\nSmallest community, member by member:")
-    for r in sorted(raw_communities[-1]):
-        print(f"  respondent {r:>3}: {missing_counts.iloc[id_to_index[r]]:>2} blanks of 60, "
-              f"degree {G.degree(r)}")
+    retained = len(respondent_ids)
+    dropped = sorted(set(int(r) for r in respondent_ids) - set(int(n) for n in G.nodes()))
+    print(f"\nRetained {retained} of 96 respondents, then removed {len(dropped)} isolates "
+          f"{dropped}")
+    print(f"Analysis graph GA : {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    print("\nAll metrics below are reported on GA.")
 
-    # Rebuild excluding respondents who left more than half the survey blank.
-    # The similarity matrix is recomputed, not filtered: the excluded rows never
-    # legitimately contributed to any pairwise comparison.
-    valid = (missing_counts <= 30).values
-    features_valid = features[valid]
-    ids_valid = respondent_ids[valid]
+    # Respondents answering few items are retained, but their ties rest on a
+    # small overlap. Report them so their influence can be judged.
+    id_to_index = {int(rid): i for i, rid in enumerate(respondent_ids)}
+    sparse = [r for r in G.nodes() if present[id_to_index[int(r)]].sum() < n_items / 2]
+    if sparse:
+        print(f"\nNOTE: {len(sparse)} retained respondents answered fewer than half the items:")
+        for r in sorted(sparse):
+            print(f"  respondent {r:>3}: {present[id_to_index[int(r)]].sum():>2} of {n_items} "
+                  f"answered, degree {G.degree(r)}")
+        print("  Their correlations are computed on that subset only, so they are noisier")
+        print("  than those of complete respondents.")
 
-    centered = features_valid - features_valid.mean(axis=1, keepdims=True)
-    sim_valid = cosine_similarity(centered)
-    np.fill_diagonal(sim_valid, 0)
-
-    GA = nx.from_numpy_array((sim_valid >= TAU).astype(int))
-    GA = nx.relabel_nodes(GA, {i: ids_valid[i] for i in range(len(ids_valid))})
-    dropped = list(nx.isolates(GA))
-    GA.remove_nodes_from(dropped)
-
-    print(f"\nStep 2 graph      : {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-    print(f"Analysis graph GA : {GA.number_of_nodes()} nodes, {GA.number_of_edges()} edges")
-    print(f"  excluded {(~valid).sum()} severe non-responders, then {len(dropped)} isolates")
-    print(f"\nOnly {G.number_of_edges() - GA.number_of_edges()} edges are lost, so the core "
-          f"structure is unaffected.\nAll metrics below are reported on GA.")
-
-    return GA, features_valid, ids_valid, sim_valid
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -445,21 +467,22 @@ def opinion_profiles(communities, features_valid, ids_valid, survey_cols):
         members = [idx_valid[r] for r in comm]
         entry = {"community": k, "size": len(comm)}
         for d, label in DOMAINS.items():
-            entry[label] = round(features_valid[np.ix_(members, domain_cols[d])].mean(), 3)
-        entry["overall"] = round(features_valid[members].mean(), 3)
+            entry[label] = round(nanmean(features_valid[np.ix_(members, domain_cols[d])]), 3)
+        entry["overall"] = round(nanmean(features_valid[members]), 3)
         rows.append(entry)
     profiles = pd.DataFrame(rows)
 
     print("Mean Likert score per community and domain (1 = Strongly Disagree, 5 = Strongly Agree):")
     print(profiles.to_string(index=False))
-    print("\nEvery community mean lies above the neutral midpoint of 3.0.")
-    print(f"Range across all communities and domains: "
-          f"{profiles[list(DOMAINS.values())].values.min():.2f} to "
-          f"{profiles[list(DOMAINS.values())].values.max():.2f}")
+    vals = profiles[list(DOMAINS.values())].values
+    n_below = (vals < 3).sum()
+    print(f"\nCommunity-by-domain means below the neutral midpoint of 3.0: {n_below} "
+          f"of {vals.size}")
+    print(f"Range across all communities and domains: {vals.min():.2f} to {vals.max():.2f}")
 
     # Which statements separate the communities, and which unite the class?
     comm_means = np.array([
-        [features_valid[[idx_valid[r] for r in comm], j].mean() for j in range(len(survey_cols))]
+        [nanmean(features_valid[[idx_valid[r] for r in comm], j]) for j in range(len(survey_cols))]
         for comm in communities
     ])
     spread = comm_means.max(axis=0) - comm_means.min(axis=0)
@@ -469,11 +492,11 @@ def opinion_profiles(communities, features_valid, ids_valid, survey_cols):
     print(pd.DataFrame({
         "item": [survey_cols[j][:70] for j in order[:10]],
         "spread": np.round(spread[order[:10]], 3),
-        "class_mean": [round(features_valid[:, j].mean(), 2) for j in order[:10]],
+        "class_mean": [round(nanmean(features_valid[:, j]), 2) for j in order[:10]],
     }).to_string(index=False))
 
-    item_mean = features_valid.mean(axis=0)
-    item_sd = features_valid.std(axis=0)
+    item_mean = np.nanmean(features_valid, axis=0)
+    item_sd = np.nanstd(features_valid, axis=0)
     calm = np.argsort(item_sd, kind="stable")
 
     print("\nTen statements attracting the strongest class-wide consensus:")
@@ -550,8 +573,8 @@ def opinion_profiles(communities, features_valid, ids_valid, survey_cols):
 def main():
     df, survey_cols, features, respondent_ids, sim_matrix, G = build_network()
 
-    GA, features_valid, ids_valid, sim_valid = data_quality_guard(
-        df, survey_cols, features, respondent_ids, G)
+    report_missing_data_policy(df, survey_cols, features, respondent_ids, G)
+    GA, features_valid, ids_valid, sim_valid = G, features, respondent_ids, sim_matrix
 
     n_nodes, n_edges = global_structure(GA)
 
