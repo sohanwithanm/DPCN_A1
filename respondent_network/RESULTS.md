@@ -12,39 +12,36 @@ Blank cells are treated as **NaN and never imputed**. A respondent who answered 
 
 This has a direct consequence for how similarity is computed. With NaN present, cosine similarity is undefined, so similarity becomes **pairwise-complete Pearson correlation**: each pair of respondents is correlated over only the items that *both* answered, with each vector centred on that co-answered subset. On complete rows this is mathematically identical to the mean-centred cosine similarity of Step 2, so the change affects only the incomplete rows — which is the intent.
 
-Of the 96 respondents, 5 were entirely blank and dropped (ids 44, 60, 68, 73, 78), leaving 91. "Overlap" here means the number of items *both* respondents answered — whether they agreed on them is what the correlation then measures. **55.6% of the 4,095 pairs overlap on all 60 items**; the remaining 44.4% overlap on fewer, with a minimum of **12**. No pair falls below the `MIN_OVERLAP = 10` floor. Treating `"No Comments"` as NaN is what reduces full-overlap pairs from 87.2% to 55.6%: those 37 cells are scattered across 17 respondents, so they puncture many pairs by an item or two. This is a mild precision cost, not a correctness problem. Thresholding at $\tau = 0.40$ and removing 3 isolates gives the analysis graph **GA: 88 nodes, 957 edges**.
+Of the 96 respondents, 5 were entirely blank and dropped (ids 44, 60, 68, 73, 78), leaving 91. "Overlap" here means the number of items *both* respondents answered — whether they agreed on them is what the correlation then measures. **55.6% of the 4,095 pairs overlap on all 60 items**; the remaining 44.4% overlap on fewer, with a minimum of **12**. No pair falls below the `MIN_OVERLAP = 10` floor. Treating `"No Comments"` as NaN is what reduces full-overlap pairs from 87.2% to 55.6%: those 37 cells are scattered across 17 respondents, so they puncture many pairs by an item or two. This is a mild precision cost, not a correctness problem. Thresholding on $|r| \geq 0.40$ and removing 3 isolates gives the analysis graph **GA: 88 nodes, 970 edges — 957 positive and 13 negative**. Thresholding on the absolute correlation retains strongly opposed respondents as negative edges rather than discarding them, matching the question-question network.
 
 Four respondents answered only the Technology block (15 of 60 items). They are retained, and their correlations rest on that subset alone, so their ties are noisier than those of complete respondents. Critically, they do **not** cluster together — their degrees are 6, 29, 15 and 6, spread across the network.
 
 ### 1. The network is dense, cohesive, and undivided
 
-The network comprises **88 respondents joined by 957 agreement ties**, with a density of **0.250** — exactly one in four of all possible pairs of students hold opinion profiles correlating at $r \geq 0.40$. It forms a **single connected component** with a diameter of **5** and a mean shortest path of **2.00**: any two respondents are separated, on average, by about two intermediate viewpoints.
+The network comprises **88 respondents joined by 970 ties**, with a density of **0.253** — exactly one in four of all possible pairs of students hold opinion profiles correlating at $r \geq 0.40$. It forms a **single connected component** with a diameter of **5** and a mean shortest path of **1.97**: any two respondents are separated, on average, by about two intermediate viewpoints.
 
-Clustering is **0.556**, more than twice the **0.257** produced by a random graph of identical size. Agreement is strongly transitive — if two respondents both agree with a third, they usually agree with each other. Combined with short path lengths, this is the signature of a *cohesive* opinion space, not a fragmented one.
+Clustering is **0.540**, more than twice the **0.260** produced by a random graph of identical size. Agreement is strongly transitive — if two respondents both agree with a third, they usually agree with each other. Combined with short path lengths, this is the signature of a *cohesive* opinion space, not a fragmented one.
 
-Degree assortativity is effectively zero (**+0.047**): respondents with mainstream views show no tendency to agree preferentially with other mainstream respondents. There is no in-group effect.
+Degree assortativity is close to zero (**+0.057**): respondents with mainstream views show no tendency to agree preferentially with other mainstream respondents. There is no in-group effect.
 
-### 2. Community structure is detectable but substantively negligible
+### 2. Community structure is detectable but not reproducible
 
-Louvain returns four communities of sizes 26, 23, 22 and 17:
+Louvain is run on the **positive-edge subgraph** (88 nodes, 957 edges), since it cannot optimise positive and negative weights together — the same approach the question network uses. It returns four communities, of sizes 38, 31, 10 and 9.
 
 | Evidence | Value | Implication |
 |---|---|---|
-| Modularity $Q$ | **0.155** | Far below the ~0.3 threshold for genuine structure |
-| Erdős–Rényi null | $Q = 0.145 \pm 0.005$ ($z = +1.90$) | Marginally above random |
-| Configuration-model null | $Q = 0.143 \pm 0.004$ ($z = +2.72$) | Above random, degrees preserved |
-| Edges crossing communities | **56.9%** | More ties break the partition than respect it |
-| Community count across seeds | 4–5 | The partition is only loosely stable |
+| Modularity $Q$ (20 node orderings) | **0.1532 ± 0.0053** | Far below the ~0.3 threshold |
+| Erdős–Rényi null | $Q = 0.1451 \pm 0.0049$ ($z = +1.66$) | Marginally above random |
+| Configuration-model null | $Q = 0.1431 \pm 0.0042$ ($z = +2.42$) | Detectable, degrees preserved |
+| Partition under 8 re-orderings | 4–5 communities, sizes 38/37/8/5 → 29/27/17/15 | **Not reproducible** |
 
-This is the one conclusion that shifted when `"No Comments"` became NaN. Under the previous policy both nulls returned $z < 1$, and the partition was indistinguishable from random. It is now **2.7 standard deviations above** a degree-preserving null, which is statistically detectable ($p \approx 0.003$).
+Modularity sits modestly above both nulls, so a faint clustering tendency is real. The partition itself, however, is not reproducible: re-ordering the nodes of the same graph under the same random seed yields four or five communities with materially different sizes. No specific community assignment is a stable property of the data, which is exactly what a modularity this close to the random baseline implies.
 
-Statistical detectability is not substantive importance, and the distinction matters here. $Q = 0.155$ remains far below the ~0.3 conventionally required to claim well-separated communities, and **56.9% of edges still cross community boundaries** — more ties break the partition than respect it. The honest reading is that a faint, real tendency toward clustering exists, but it is far too weak to describe the class as divided into camps.
+**Negative edges provide an independent test.** If the communities were genuine factions, opposition should run *between* them. It does: **all 13 negative edges join different communities, none falls within one** (4.2 expected by chance, $p = 0.006$). The partition separates real opposition — there is simply very little of it, 13 ties out of 970.
 
-A caveat on the shift itself: with `"No Comments"` as NaN, pairs are correlated on varying item subsets, which makes correlations noisier and can manufacture mild apparent clustering. Some of the $z$ increase may be this effect rather than genuine structure. The substantive conclusion is unchanged either way, because $Q$ barely moved (0.148 → 0.155).
+The threshold sweep reinforces this. Modularity climbs from $Q = 0.06$ at $\tau = 0.20$ to $Q = 0.54$ at $\tau = 0.65$, correlating at **−0.975** with the share of respondents retained. At $\tau = 0.65$ the network looks factional only because it has discarded 53% of the class.
 
-The threshold sweep reinforces this. Modularity climbs from $Q = 0.06$ at $\tau = 0.20$ to $Q = 0.54$ at $\tau = 0.65$, which might appear to vindicate a stricter threshold — but it correlates at **−0.975** with the share of respondents retained. At $\tau = 0.65$ the network looks convincingly factional precisely because it has discarded **53% of the class** and fragmented into 3 components. Most of the apparent community structure is a property of the cut, not of the students.
-
-**The class does not divide into opinion camps. It occupies a single broad consensus with only faint internal clustering.**
+**The class does not divide into opinion camps.**
 
 ### 3. The communities differ in intensity, not direction
 
@@ -83,11 +80,11 @@ The structure of class opinion is therefore: **shared values, contested implemen
 
 ### 5. Methodological findings
 
-**The missing-data policy changes what the analysis can see.** An earlier version of this pipeline imputed every blank as neutral (3). That silently manufactured structure: the four respondents who answered only the Technology block received 45 identical filler values each, became near-identical to one another, and were grouped by Louvain into a "community" whose members shared nothing but their non-response. Worse, because their item means were pinned at exactly 3.0, they inverted the divisive-item ranking — statements of *strongest consensus* appeared most divisive, since spread was simply measuring distance from neutral. Treating blanks as NaN and correlating on pairwise-complete items removes both effects: the four respondents disperse (degrees 6, 29, 15, 6) and the Technology finding re-emerges.
+**Neutral imputation would manufacture structure.** Filling unanswered items with the neutral value 3 makes respondents similar in proportion to how little they answered. Four respondents completed only the Technology block; under imputation they would carry 45 identical filler values each, become near-identical to one another, and be grouped into a community whose members share nothing but their non-response. The distortion also reaches the item statistics: with their per-domain means pinned at exactly 3.0, item spread measures distance from neutral rather than disagreement, which inverts the divisive-item ranking so that statements of strongest consensus appear most divisive. Treating unanswered items as NaN and correlating on pairwise-complete items avoids both effects — the four respondents disperse across the network, with degrees 6, 29, 15 and 6.
 
-**The `"No Comments"` decision is the same argument applied one level further.** Mapping it to 3 asserted a neutral opinion for respondents who explicitly declined to give one, when the survey already offered `"Neutral"` separately and every user of `"No Comments"` used `"Neutral"` too. Switching it to NaN cost precision (full-overlap pairs fell from 87.2% to 55.6%) and moved one conclusion: community structure went from indistinguishable-from-random to faintly-above-random. Both effects are reported above rather than smoothed over.
+**`"No Comments"` is a withheld opinion, not a neutral one.** The survey offers `"Neutral"` as a separate option, and all 17 respondents who selected `"No Comments"` used `"Neutral"` elsewhere in the same survey; none treated them as interchangeable. Encoding it as 3 would attribute a position that the respondent declined to state. Treating it as missing carries a precision cost — full-overlap pairs fall to 55.6% of all pairs, since those 37 cells are scattered across 17 respondents — which is reported in Section 0 rather than absorbed silently.
 
-**The threshold is the analysis.** Because $\tau$ simultaneously determines density, connectivity, and modularity, no structural claim from a thresholded correlation network is interpretable without a sensitivity sweep. Reporting $\tau = 0.40$ alone would have concealed that the community structure at that threshold is indistinguishable from random.
+**The threshold is the analysis.** Because $\tau$ simultaneously determines density, connectivity, and modularity, no structural claim from a thresholded correlation network is interpretable without a sensitivity sweep. Quoting $\tau = 0.40$ alone would conceal that the community structure at that threshold is barely distinguishable from random.
 
 ### 6. Limitations
 

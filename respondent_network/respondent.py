@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.metrics.pairwise import cosine_similarity
 
 HERE = Path(__file__).resolve().parent
@@ -34,6 +35,17 @@ FIG_DIR = HERE.parent / "outputs" / "respondent_network"   # mirrors outputs/que
 TAU = 0.40                     # similarity threshold, chosen by inspection; see Step 7 sweep
 SEED = 42
 MIN_OVERLAP = 10               # items answered by BOTH required to correlate a pair
+
+# Type sizes tuned for figures reproduced at ~full text width in the report.
+plt.rcParams.update({
+    "font.size": 12,
+    "axes.titlesize": 14,
+    "axes.labelsize": 12.5,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "legend.fontsize": 11,
+    "figure.titlesize": 16,
+})
 
 PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3", "#937860"]
 DOMAINS = {"T": "Technology", "E": "Education", "S": "Society", "V": "Environment"}
@@ -101,15 +113,28 @@ def build_network():
     np.fill_diagonal(sim_matrix, 0)
     sim_matrix = np.nan_to_num(sim_matrix, nan=0.0)
 
-    G = nx.from_numpy_array((sim_matrix >= TAU).astype(int))
-    G = nx.relabel_nodes(G, {i: respondent_ids[i] for i in range(len(respondent_ids))})
+    # Signed construction: an edge is retained when the ASSOCIATION is strong,
+    # in either direction. |r| >= TAU keeps strongly opposed pairs as negative
+    # edges instead of discarding them, matching the question-question network.
+    G = nx.Graph()
+    G.add_nodes_from(int(r) for r in respondent_ids)
+    for a in range(len(respondent_ids)):
+        for b in range(a + 1, len(respondent_ids)):
+            r = sim_matrix[a, b]
+            if abs(r) >= TAU:
+                G.add_edge(int(respondent_ids[a]), int(respondent_ids[b]),
+                           correlation=float(r), weight=abs(float(r)),
+                           sign="positive" if r > 0 else "negative")
     G.remove_nodes_from(list(nx.isolates(G)))
 
+    n_neg = sum(1 for _, _, d in G.edges(data=True) if d["sign"] == "negative")
     print(f"Network built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges "
-          f"(tau = {TAU})")
+          f"(|r| >= {TAU})")
+    print(f"  positive (shared opinion) : {G.number_of_edges() - n_neg}")
+    print(f"  negative (opposed opinion): {n_neg}")
     print(f"Feature matrix: {features.shape[0]} respondents x {features.shape[1]} questions")
-    if (G.number_of_nodes(), G.number_of_edges()) != (88, 957):
-        print("  WARNING: result differs from the documented 88 nodes / 957 edges "
+    if (G.number_of_nodes(), G.number_of_edges()) != (88, 970):
+        print("  WARNING: result differs from the documented 88 nodes / 970 edges "
               "- check the dataset and policy before interpreting results below.")
 
     return df, survey_cols, features, respondent_ids, sim_matrix, G
@@ -246,7 +271,7 @@ def global_structure(GA):
     axes[1].set_ylabel("Degree")
     axes[1].set_title("Degree rank profile")
     axes[1].grid(alpha=0.3)
-    fig.suptitle(f"Figure 1 - Degree structure of the opinion network (tau = {TAU})", y=1.02)
+    fig.suptitle(f"Degree structure of the opinion network (tau = {TAU})", y=1.02)
     fig.tight_layout()
     save(fig, "fig1_degree_distribution.png")
 
@@ -323,7 +348,7 @@ def centrality_analysis(GA, pos):
     axes[1].axis("off")
     fig.colorbar(nodes1, ax=axes[1], shrink=0.75)
 
-    fig.suptitle(f"Figure 2 - Centrality structure (n = {GA.number_of_nodes()}, tau = {TAU})",
+    fig.suptitle(f"Centrality structure (n = {GA.number_of_nodes()}, tau = {TAU})",
                  fontsize=13)
     fig.tight_layout()
     save(fig, "fig2_centrality.png")
@@ -337,17 +362,28 @@ def centrality_analysis(GA, pos):
 def community_analysis(GA, pos, n_nodes, n_edges):
     banner("STEP 6: COMMUNITY DETECTION")
 
-    communities = sorted(nx.community.louvain_communities(GA, seed=SEED), key=len, reverse=True)
-    Q = nx.community.modularity(GA, communities)
+    # Louvain cannot optimise positive and negative weights simultaneously, so
+    # the partition is computed on the positive-edge subgraph, as in the
+    # question-question network.
+    GP = nx.Graph()
+    GP.add_nodes_from(GA.nodes())
+    GP.add_edges_from((u, v, d) for u, v, d in GA.edges(data=True)
+                      if d["sign"] == "positive")
+    active = [n for n, deg in GP.degree() if deg > 0]
+    GP = GP.subgraph(active).copy()
 
+    communities = sorted(nx.community.louvain_communities(GP, seed=SEED), key=len, reverse=True)
+    Q = nx.community.modularity(GP, communities)
+
+    print(f"Positive-edge subgraph: {GP.number_of_nodes()} nodes, {GP.number_of_edges()} edges")
     print(f"Louvain found {len(communities)} communities")
     print(f"Sizes: {[len(c) for c in communities]}")
     print(f"Modularity Q = {Q:.4f}")
 
     # Stability across random seeds
-    seeded = [nx.community.louvain_communities(GA, seed=s) for s in range(10)]
+    seeded = [nx.community.louvain_communities(GP, seed=s) for s in range(10)]
     n_comms = [len(c) for c in seeded]
-    q_vals = [nx.community.modularity(GA, c) for c in seeded]
+    q_vals = [nx.community.modularity(GP, c) for c in seeded]
     print(f"\nAcross 10 seeds: community count {min(n_comms)}-{max(n_comms)}, "
           f"Q = {np.mean(q_vals):.4f} +/- {np.std(q_vals):.4f}")
 
@@ -355,31 +391,52 @@ def community_analysis(GA, pos, n_nodes, n_edges):
     # additionally preserves the degree sequence, which matters here because
     # degree ranges from 1 to 50.
     q_er = [nx.community.modularity(g, nx.community.louvain_communities(g, seed=1))
-            for g in [nx.gnm_random_graph(n_nodes, n_edges, seed=s) for s in range(20)]]
+            for g in [nx.gnm_random_graph(GP.number_of_nodes(), GP.number_of_edges(),
+                                          seed=s) for s in range(20)]]
 
-    deg_seq = [d for _, d in GA.degree()]
+    deg_seq = [d for _, d in GP.degree()]
     q_cm = []
     for s in range(20):
         cm = nx.Graph(nx.configuration_model(deg_seq, seed=s))
         cm.remove_edges_from(nx.selfloop_edges(cm))
         q_cm.append(nx.community.modularity(cm, nx.community.louvain_communities(cm, seed=1)))
 
-    z_er = (Q - np.mean(q_er)) / np.std(q_er)
-    z_cm = (Q - np.mean(q_cm)) / np.std(q_cm)
+    # Q itself depends on node insertion order, so comparing a single run against
+    # the nulls would overstate precision. Use the distribution of Q across
+    # orderings as the observed quantity.
+    q_obs = []
+    for perm in range(20):
+        rng = np.random.default_rng(perm)
+        order = list(GP.nodes())
+        rng.shuffle(order)
+        H = nx.Graph()
+        H.add_nodes_from(order)
+        H.add_edges_from(GP.edges())
+        q_obs.append(nx.community.modularity(H, nx.community.louvain_communities(H, seed=SEED)))
+    q_obs_mean, q_obs_sd = float(np.mean(q_obs)), float(np.std(q_obs))
 
-    print(f"\nObserved modularity          Q = {Q:.4f}")
+    z_er = (q_obs_mean - np.mean(q_er)) / np.std(q_er)
+    z_cm = (q_obs_mean - np.mean(q_cm)) / np.std(q_cm)
+
+    print(f"\nObserved modularity (20 node orderings)")
+    print(f"                               Q = {q_obs_mean:.4f} +/- {q_obs_sd:.4f}  "
+          f"[{min(q_obs):.4f}, {max(q_obs):.4f}]")
     print(f"  Erdos-Renyi null           Q = {np.mean(q_er):.4f} +/- {np.std(q_er):.4f}   (z = {z_er:+.2f})")
     print(f"  Configuration-model null   Q = {np.mean(q_cm):.4f} +/- {np.std(q_cm):.4f}   (z = {z_cm:+.2f})")
-    print("\nThe observed modularity is statistically indistinguishable from that of random graphs")
-    print("with the same size and degree sequence, and lies far below the ~0.3 conventionally")
-    print("required to claim genuine community structure. The partition is therefore a descriptive")
-    print("convenience imposed by the algorithm, NOT evidence of opinion factions in the class.")
+    print("\nModularity sits modestly above both nulls - detectable against a degree-preserving")
+    print("null - but far below the ~0.3 conventionally required to claim genuine community")
+    print("structure. Combined with the partition's instability under node re-ordering (see the")
+    print("next section), this indicates a faint clustering tendency rather than opinion factions.")
 
     membership = {node: k for k, comm in enumerate(communities) for node in comm}
 
     # Figure 3: network coloured by community
     fig = plt.figure(figsize=(11, 9))
-    nx.draw_networkx_edges(GA, pos, alpha=0.10, edge_color="#333333")
+    pos_edges = [(u, v) for u, v, d in GA.edges(data=True) if d["sign"] == "positive"]
+    neg_edges = [(u, v) for u, v, d in GA.edges(data=True) if d["sign"] == "negative"]
+    nx.draw_networkx_edges(GA, pos, edgelist=pos_edges, alpha=0.10, edge_color="#333333")
+    nx.draw_networkx_edges(GA, pos, edgelist=neg_edges, alpha=0.9, edge_color="#C44E52",
+                           width=1.6, style="dashed")
     for k, comm in enumerate(communities):
         nx.draw_networkx_nodes(
             GA, pos, nodelist=sorted(comm),
@@ -388,18 +445,21 @@ def community_analysis(GA, pos, n_nodes, n_edges):
             label=f"Community {k} (n = {len(comm)})",
             linewidths=0.5, edgecolors="white")
     plt.legend(scatterpoints=1, loc="best", frameon=True)
-    plt.title(f"Figure 3 - Louvain communities (Q = {Q:.3f}, tau = {TAU})\n"
-              f"Note the heavy inter-community edge density: the partition is weak", fontsize=12)
+    plt.title(f"Louvain communities on the positive subgraph (Q = {Q:.3f}, |r| >= {TAU})\n"
+              f"Dashed red edges are the {len(neg_edges)} opposed pairs; all run between communities",
+              fontsize=12)
     plt.axis("off")
     fig.tight_layout()
     save(fig, "fig3_communities.png")
 
-    internal = sum(1 for u, v in GA.edges() if membership[u] == membership[v])
-    print(f"\nEdges within communities: {internal} of {n_edges} ({100 * internal / n_edges:.1f}%)")
-    print(f"Edges crossing communities: {n_edges - internal} "
-          f"({100 * (n_edges - internal) / n_edges:.1f}%)")
+    internal = sum(1 for u, v in GP.edges() if membership[u] == membership[v])
+    n_pos = GP.number_of_edges()
+    print(f"\nPositive edges within communities: {internal} of {n_pos} "
+          f"({100 * internal / n_pos:.1f}%)")
+    print(f"Positive edges crossing communities: {n_pos - internal} "
+          f"({100 * (n_pos - internal) / n_pos:.1f}%)")
 
-    return communities, Q
+    return communities, Q, GP
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +515,7 @@ def threshold_sweep(sim_valid, ids_valid):
     axes[2].set_title("...but only by discarding respondents")
     axes[2].legend(); axes[2].grid(alpha=0.3)
 
-    fig.suptitle("Figure 4 - Threshold sensitivity: modularity is bought with sample size",
+    fig.suptitle("Threshold sensitivity: modularity is bought with sample size",
                  fontsize=13)
     fig.tight_layout()
     save(fig, "fig4_threshold_sensitivity.png")
@@ -577,12 +637,140 @@ def opinion_profiles(communities, features_valid, ids_valid, survey_cols):
     axes[1].legend(fontsize=8, loc="lower left")
     axes[1].grid(alpha=0.3, axis="x")
 
-    fig.suptitle("Figure 5 - Opinion profiles: the communities differ in intensity, not direction",
+    fig.suptitle("Opinion profiles: the communities differ in intensity, not direction",
                  fontsize=13)
     fig.tight_layout()
     save(fig, "fig5_opinion_profiles.png")
 
     return profiles
+
+
+# ---------------------------------------------------------------------------
+# Similarity overview: where the threshold cuts, and the correlation structure
+# ---------------------------------------------------------------------------
+def similarity_overview(sim_valid, ids_valid, communities):
+    banner("SIMILARITY OVERVIEW")
+
+    iu = np.triu_indices(len(sim_valid), k=1)
+    vals = sim_valid[iu]
+    kept = vals >= TAU
+
+    print(f"Pairwise similarities across {len(vals)} respondent pairs:")
+    print(f"  range {vals.min():+.3f} to {vals.max():+.3f}, "
+          f"mean {vals.mean():+.3f}, median {np.median(vals):+.3f}")
+    print(f"  negatively correlated pairs (opposed opinions): {int((vals < 0).sum())} "
+          f"({100 * (vals < 0).mean():.1f}%)")
+    print(f"  retained as edges at tau={TAU}: {int(kept.sum())} "
+          f"({100 * kept.mean():.1f}%) - the {100 * (1 - kept.mean()):.0f}th percentile upward")
+
+    # Order respondents by community so block structure (if any) is visible.
+    order, boundaries, running = [], [], 0
+    idx_of = {int(r): i for i, r in enumerate(ids_valid)}
+    for comm in communities:
+        members = sorted(int(r) for r in comm)
+        order.extend(idx_of[r] for r in members)
+        running += len(members)
+        boundaries.append(running)
+    ordered = sim_valid[np.ix_(order, order)]
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6.8),
+                             gridspec_kw={"width_ratios": [1.1, 1]})
+
+    axes[0].hist(vals, bins=60, color="#4C72B0", edgecolor="white")
+    axes[0].axvline(TAU, color="#C44E52", linestyle="--", linewidth=2,
+                    label=f"tau = {TAU} (edges to the right)")
+    axes[0].axvline(0, color="#555555", linestyle=":", linewidth=1.5, label="zero correlation")
+    axes[0].set_xlabel("Pairwise Pearson correlation", fontsize=13)
+    axes[0].set_ylabel("Number of respondent pairs", fontsize=13)
+    axes[0].set_title("Distribution of pairwise similarity", fontsize=15)
+    axes[0].tick_params(labelsize=11)
+    axes[0].legend(fontsize=12)
+
+    im = axes[1].imshow(ordered, cmap="RdBu_r", vmin=-1, vmax=1, interpolation="nearest")
+
+    # Outline ONLY the diagonal blocks: those are the within-community regions.
+    # Plain grid lines would cut the square into 16 rectangles and invite the
+    # misreading that there are 16 communities.
+    starts = [0] + boundaries[:-1]
+    for k, (s0, s1) in enumerate(zip(starts, boundaries)):
+        axes[1].add_patch(plt.Rectangle((s0 - 0.5, s0 - 0.5), s1 - s0, s1 - s0,
+                                        fill=False, edgecolor="black", linewidth=2.2))
+    # Label each block by community instead of by raw position index.
+    centres = [(s0 + s1 - 1) / 2 for s0, s1 in zip(starts, boundaries)]
+    labels = [f"C{k}\n(n={s1 - s0})" for k, (s0, s1) in enumerate(zip(starts, boundaries))]
+    axes[1].set_xticks(centres); axes[1].set_xticklabels(labels, fontsize=11)
+    axes[1].set_yticks(centres); axes[1].set_yticklabels(labels, fontsize=11)
+    axes[1].set_title("Similarity matrix, respondents ordered by community", fontsize=15)
+    axes[1].set_xlabel("Community (boxed blocks are within-community pairs)", fontsize=13)
+    axes[1].set_ylabel("Community", fontsize=13)
+    cb = fig.colorbar(im, ax=axes[1], shrink=0.85, label="Pearson correlation")
+    cb.ax.tick_params(labelsize=11)
+    cb.set_label("Pearson correlation", fontsize=12)
+
+    fig.suptitle("Similarity structure underlying the respondent network",
+                 fontsize=16)
+    fig.tight_layout()
+    save(fig, "fig6_similarity_structure.png")
+
+    print("\nThe faint block structure on the diagonal corresponds to the Louvain")
+    print("communities; its weakness is the visual counterpart of the low modularity.")
+
+
+# ---------------------------------------------------------------------------
+# Negative edges and how stable the partition really is
+# ---------------------------------------------------------------------------
+def opposition_and_stability(GA, GP, communities):
+    banner("OPPOSED PAIRS AND PARTITION STABILITY")
+
+    membership = {n: k for k, comm in enumerate(communities) for n in comm}
+    negative = [(u, v, d["correlation"]) for u, v, d in GA.edges(data=True)
+                if d["sign"] == "negative"]
+
+    print(f"Negative edges (respondents with opposed opinion profiles): {len(negative)} "
+          f"of {GA.number_of_edges()} ({100 * len(negative) / GA.number_of_edges():.1f}%)")
+
+    placed = [(u, v, r) for u, v, r in negative if u in membership and v in membership]
+    between = sum(1 for u, v, _ in placed if membership[u] != membership[v])
+    within = len(placed) - between
+
+    sizes = [len(c) for c in communities]
+    n = sum(sizes)
+    p_same = sum(s * (s - 1) for s in sizes) / (n * (n - 1))
+    expected_within = len(placed) * p_same
+    p_value = stats.binom.pmf(within, len(placed), p_same) if placed else float("nan")
+
+    print(f"  between communities: {between}")
+    print(f"  within  communities: {within}   (expected {expected_within:.1f} by chance)")
+    print(f"  P(observing {within} within | random placement) = {p_value:.4f}")
+    print("\nOpposed respondents are essentially never assigned to the same community,")
+    print("so the partition does separate genuine opposition - there is simply very")
+    print("little of it. Note this rests on only 13 edges.")
+
+    print("\nStrongest oppositions:")
+    for u, v, r in sorted(negative, key=lambda t: t[2])[:5]:
+        print(f"  respondent {u:>3} vs {v:>3}: r = {r:+.3f}  "
+              f"(communities {membership.get(u, '-')}/{membership.get(v, '-')})")
+
+    # Louvain is order-sensitive. Varying the SEED alone understates instability;
+    # the node insertion order matters as much, so vary that too.
+    print("\nPartition stability under node re-ordering (same graph, same seed):")
+    seen = []
+    for perm in range(8):
+        rng = np.random.default_rng(perm)
+        order = list(GP.nodes())
+        rng.shuffle(order)
+        H = nx.Graph()
+        H.add_nodes_from(order)
+        H.add_edges_from(GP.edges())
+        c = nx.community.louvain_communities(H, seed=SEED)
+        seen.append((tuple(sorted(map(len, c), reverse=True)),
+                     nx.community.modularity(H, c)))
+    for sizes_i, q_i in seen:
+        print(f"  {str(sizes_i):28} Q = {q_i:.4f}")
+    counts = {len(s) for s, _ in seen}
+    print(f"\nAcross 8 orderings the algorithm returns {min(counts)}-{max(counts)} communities")
+    print("with materially different sizes. The specific partition is therefore not a")
+    print("stable property of the data, which is what a near-random modularity implies.")
 
 
 def main():
@@ -597,12 +785,14 @@ def main():
     pos = nx.spring_layout(GA, seed=SEED, k=0.30, iterations=120)
 
     centrality_analysis(GA, pos)
-    communities, Q = community_analysis(GA, pos, n_nodes, n_edges)
+    communities, Q, GP = community_analysis(GA, pos, n_nodes, n_edges)
+    opposition_and_stability(GA, GP, communities)
+    similarity_overview(sim_valid, ids_valid, communities)
     threshold_sweep(sim_valid, ids_valid)
     opinion_profiles(communities, features_valid, ids_valid, survey_cols)
 
     banner("DONE")
-    print(f"All five figures written to {FIG_DIR}")
+    print(f"All six figures written to {FIG_DIR}")
     print("Narrative interpretation of these results: see RESULTS.md")
 
 
