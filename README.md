@@ -4,7 +4,7 @@ This repository contains the data processing pipeline, network construction, and
 
 ## Local Setup
 
-To run the analysis notebooks, you must set up a local Python virtual environment to manage dependencies.
+To run the analysis notebook and scripts, you must set up a local Python virtual environment to manage dependencies.
 
 ### 1. Initialize the Virtual Environment
 Run the following command in the root directory of this project to create an isolated environment:
@@ -34,12 +34,27 @@ source .venv/bin/activate
 
 ### 3. Install Required Modules
 
-Once the virtual environment is active (your terminal prompt will usually show `(.venv)`), install the necessary dependencies:
+Once the virtual environment is active (your terminal prompt will usually show `(.venv)`), install the dependencies from `requirements.txt`:
 
 ```bash
-pip install pandas numpy scikit-learn networkx matplotlib ipykernel
+pip install -r requirements.txt
 
 ```
+
+Installing from `requirements.txt` rather than naming packages by hand keeps everyone on the same versions, and pins `ipykernel` below version 7 — the 7.x releases cannot be started by the VS Code Jupyter extension.
+
+### 4. Run the Analysis
+
+With the environment active, run the network analysis script from the project root:
+
+```bash
+python network_analysis.py
+
+```
+
+It prints every metric to the terminal and writes the five figures to `figures/`. The narrative interpretation of the results is in `RESULTS.md`.
+
+If you get a `ModuleNotFoundError`, the wrong Python is being used — check with `which python` (macOS/Linux) or `where python` (Windows) that it points inside `.venv`.
 
 ## Module Overview
 

@@ -1,0 +1,8 @@
+
+# Install with: python -m pip install -r requirements.txt
+pandas
+numpy
+scikit-learn
+networkx
+matplotlib
+ipykernel
