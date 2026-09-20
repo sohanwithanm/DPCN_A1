@@ -8,13 +8,13 @@ network reveals about class opinions. Maps onto the "Analysis and
 Visualizations" and "Results and Discussion" sections of the report.
 
 Network construction (Likert encoding, similarity, thresholding) is documented
-in analysis.ipynb; Step 0 below reproduces it verbatim so this script runs
+in construction.ipynb; Step 0 below reproduces it verbatim so this script runs
 standalone.
 
 Usage:
-    .venv/bin/python network_analysis.py
+    python respondent_network/respondent.py
 
-Writes all figures to ./figures/ and prints every metric to stdout.
+Writes all figures to respondent_network/figures/ and prints every metric to stdout.
 """
 
 import matplotlib
@@ -29,12 +29,12 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 HERE = Path(__file__).resolve().parent
-DATA_FILE = HERE / "Survey_Results_UC.csv"
+DATA_FILE = HERE.parent / "Survey_Results_UC.csv"   # shared dataset at the repo root
 FIG_DIR = HERE / "figures"
 
-TAU = 0.40                     # similarity threshold, per analysis.ipynb Step 2
+TAU = 0.40                     # similarity threshold, per construction.ipynb Step 2
 SEED = 42
-MIN_OVERLAP = 10               # shared answered items required to correlate a pair
+MIN_OVERLAP = 10               # items answered by BOTH required to correlate a pair
 
 PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3", "#937860"]
 DOMAINS = {"T": "Technology", "E": "Education", "S": "Society", "V": "Environment"}
@@ -45,7 +45,10 @@ LIKERT = {
     "Neutral": 3,
     "Agree": 4,
     "Strongly Agree": 5,
-    "No Comments": 3,
+    # "No Comments" is deliberately absent, so it maps to NaN. Respondents had a
+    # separate "Neutral" option and all 17 who used "No Comments" also used
+    # "Neutral" elsewhere, so the two are not interchangeable: "No Comments"
+    # withholds an opinion rather than asserting a middle one.
 }
 
 
@@ -66,25 +69,25 @@ def save(fig, name):
     path = FIG_DIR / name
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  [figure saved] figures/{name}")
+    print(f"  [figure saved] {FIG_DIR.name}/{name}")
 
 
 # ---------------------------------------------------------------------------
-# Step 0: reproduce the constructed network (analysis.ipynb Steps 1-2)
+# Step 0: reproduce the constructed network (construction.ipynb Steps 1-2)
 # ---------------------------------------------------------------------------
 def build_network():
-    """Reproduce analysis.ipynb Steps 1-2 (missing-data policy + similarity).
+    """Reproduce construction.ipynb Steps 1-2 (missing-data policy + similarity).
 
     Blanks stay NaN and are never imputed; entirely blank respondents are
     dropped; similarity is pairwise-complete Pearson correlation over the items
-    each pair both answered.
+    both members of a pair answered.
     """
     banner("STEP 0: REPRODUCING THE CONSTRUCTED NETWORK")
 
     df = pd.read_csv(DATA_FILE)
     survey_cols = df.columns[1:]
 
-    # Step 1 of analysis.ipynb: vectorisation, blanks left as NaN
+    # Step 1 of construction.ipynb: vectorisation, blanks left as NaN
     numeric = df[survey_cols].apply(lambda c: c.map(LIKERT))
     answered = numeric.notna().sum(axis=1)
     keep = (answered > 0).values
@@ -92,7 +95,7 @@ def build_network():
     features = numeric[keep].to_numpy(dtype=float)
     respondent_ids = df["id. Response ID"].values[keep]
 
-    # Step 2 of analysis.ipynb: pairwise-complete Pearson, thresholded
+    # Step 2 of construction.ipynb: pairwise-complete Pearson, thresholded
     sim_matrix = (pd.DataFrame(features.T)
                   .corr(method="pearson", min_periods=MIN_OVERLAP)
                   .to_numpy())
@@ -106,11 +109,11 @@ def build_network():
     print(f"Reproduced network: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges "
           f"(tau = {TAU})")
     print(f"Feature matrix: {features.shape[0]} respondents x {features.shape[1]} questions")
-    if (G.number_of_nodes(), G.number_of_edges()) != (88, 946):
-        print("  WARNING: construction diverges from analysis.ipynb Step 2 "
+    if (G.number_of_nodes(), G.number_of_edges()) != (88, 957):
+        print("  WARNING: construction diverges from construction.ipynb Step 2 "
               "- re-sync before interpreting results below.")
     else:
-        print("Matches analysis.ipynb Step 2.")
+        print("Matches construction.ipynb Step 2.")
 
     return df, survey_cols, features, respondent_ids, sim_matrix, G
 
@@ -121,27 +124,35 @@ def report_missing_data_policy(df, survey_cols, features, respondent_ids, G):
     Policy:
       * Blank cells are NaN. They are never imputed.
       * A respondent who answered nothing is dropped entirely.
-      * "No Comments" is an explicit answer, so it maps to the neutral value 3.
+      * "No Comments" withholds an opinion, so it is NaN like a blank cell.
 
     Because the feature matrix contains NaN, cosine similarity cannot be used.
     Similarity is pairwise-complete Pearson correlation: each pair is correlated
-    over only the items BOTH answered, each vector centred on that shared subset.
+    over only the items both answered, each vector centred on that co-answered subset.
     On complete rows this is identical to mean-centred cosine similarity, so the
     policy affects only the incomplete rows - which is the point.
     """
     banner("STEP 3: MISSING-DATA POLICY (NaN, NO IMPUTATION)")
 
     n_items = len(survey_cols)
-    raw_answered = df[survey_cols].notna().sum(axis=1)
+    # Count on the MAPPED values: a cell is unanswered if it was blank OR
+    # "No Comments", both of which map to NaN.
+    mapped = df[survey_cols].apply(lambda c: c.map(LIKERT))
+    raw_answered = mapped.notna().sum(axis=1)
+
+    n_blank = int(df[survey_cols].isna().sum().sum())
+    n_nocomment = int((df[survey_cols] == "No Comments").sum().sum())
+    n_unanswered = n_blank + n_nocomment
 
     print("Response completeness across all 96 respondents")
     print(f"  fully complete ({n_items} answered) : {(raw_answered == n_items).sum()}")
     print(f"  partial (1-{n_items - 1} answered)      : "
           f"{((raw_answered > 0) & (raw_answered < n_items)).sum()}")
     print(f"  entirely blank (0 answered)  : {(raw_answered == 0).sum()}")
-    print(f"\nBlank cells: {int(df[survey_cols].isna().sum().sum())} of {96 * n_items} "
-          f"({100 * df[survey_cols].isna().sum().sum() / (96 * n_items):.1f}%) "
-          f"- left as NaN, not imputed")
+    print(f"\nUnanswered cells: {n_unanswered} of {96 * n_items} "
+          f"({100 * n_unanswered / (96 * n_items):.1f}%) - all NaN, none imputed")
+    print(f"  {n_blank} blank + {n_nocomment} \"No Comments\" "
+          f"(a withheld opinion, not a neutral one)")
 
     empty_ids = [int(r) for r in df["id. Response ID"][raw_answered == 0]]
     print(f"\nDropped as entirely blank: {empty_ids}")
@@ -149,12 +160,19 @@ def report_missing_data_policy(df, survey_cols, features, respondent_ids, G):
     present = ~np.isnan(features)
     overlap = present.astype(int) @ present.astype(int).T
     iu = np.triu_indices(len(features), k=1)
-    print(f"\nPairwise-complete overlap (shared answered items) across "
-          f"{len(overlap[iu])} pairs:")
-    print(f"  min {overlap[iu].min()}, median {int(np.median(overlap[iu]))}, "
-          f"max {overlap[iu].max()}")
+    # The overlap distribution is bimodal - most respondents completed the survey,
+    # a few answered one block - so a median sits at the ceiling and hides the tail.
+    # Report the split instead.
+    ov = overlap[iu]
+    full = int((ov == n_items).sum())
+    partial = len(ov) - full
+    print(f"\nCo-answered items per pair (items answered by both, agreement aside) across "
+          f"{len(ov)} pairs:")
+    print(f"  all {n_items} items    : {full} pairs ({100 * full / len(ov):.1f}%)")
+    print(f"  fewer than {n_items}   : {partial} pairs ({100 * partial / len(ov):.1f}%), "
+          f"minimum {ov.min()}")
     print(f"  pairs below the MIN_OVERLAP={MIN_OVERLAP} floor (similarity forced to 0): "
-          f"{(overlap[iu] < MIN_OVERLAP).sum()}")
+          f"{int((ov < MIN_OVERLAP).sum())}")
 
     retained = len(respondent_ids)
     dropped = sorted(set(int(r) for r in respondent_ids) - set(int(n) for n in G.nodes()))
