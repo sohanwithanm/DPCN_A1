@@ -1,0 +1,4 @@
+threshold,nodes,edges,positive_edges,negative_edges,isolates,components,largest_component,density
+0.25,60,494,482,12,0,1,60,0.2790960451977401
+0.3,60,328,322,6,3,4,57,0.18531073446327684
+0.35,60,189,188,1,12,13,48,0.10677966101694915
