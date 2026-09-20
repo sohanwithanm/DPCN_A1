@@ -2,19 +2,18 @@
 Assignment 1: Opinion Network Formation - Network Analysis
 ==========================================================
 
-Covers the analysis half of the pipeline: global structure, centrality,
-community detection, threshold sensitivity, and interpretation of what the
-network reveals about class opinions. Maps onto the "Analysis and
-Visualizations" and "Results and Discussion" sections of the report.
+Self-contained pipeline for the network whose NODES ARE RESPONDENTS: encoding,
+missing-data policy, similarity, thresholding, then global structure, centrality,
+community detection, threshold sensitivity, and interpretation. Maps onto the
+"Pipeline Followed", "Analysis and Visualizations" and "Results and Discussion"
+sections of the report.
 
-Network construction (Likert encoding, similarity, thresholding) is documented
-in construction.ipynb; Step 0 below reproduces it verbatim so this script runs
-standalone.
+The companion analysis whose nodes are questions is question_question_network.ipynb.
 
 Usage:
     python respondent_network/respondent.py
 
-Writes all figures to respondent_network/figures/ and prints every metric to stdout.
+Writes all figures to outputs/respondent_network/ and prints every metric to stdout.
 """
 
 import matplotlib
@@ -30,9 +29,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 HERE = Path(__file__).resolve().parent
 DATA_FILE = HERE.parent / "Survey_Results_UC.csv"   # shared dataset at the repo root
-FIG_DIR = HERE / "figures"
+FIG_DIR = HERE.parent / "outputs" / "respondent_network"   # mirrors outputs/question_question_network
 
-TAU = 0.40                     # similarity threshold, per construction.ipynb Step 2
+TAU = 0.40                     # similarity threshold, chosen by inspection; see Step 7 sweep
 SEED = 42
 MIN_OVERLAP = 10               # items answered by BOTH required to correlate a pair
 
@@ -73,21 +72,21 @@ def save(fig, name):
 
 
 # ---------------------------------------------------------------------------
-# Step 0: reproduce the constructed network (construction.ipynb Steps 1-2)
+# Step 0: build the network (encoding, missing-data policy, similarity)
 # ---------------------------------------------------------------------------
 def build_network():
-    """Reproduce construction.ipynb Steps 1-2 (missing-data policy + similarity).
+    """Build the respondent network: missing-data policy + similarity + threshold.
 
     Blanks stay NaN and are never imputed; entirely blank respondents are
     dropped; similarity is pairwise-complete Pearson correlation over the items
     both members of a pair answered.
     """
-    banner("STEP 0: REPRODUCING THE CONSTRUCTED NETWORK")
+    banner("STEP 0: BUILDING THE NETWORK")
 
     df = pd.read_csv(DATA_FILE)
     survey_cols = df.columns[1:]
 
-    # Step 1 of construction.ipynb: vectorisation, blanks left as NaN
+    # Vectorisation: blanks and "No Comments" left as NaN
     numeric = df[survey_cols].apply(lambda c: c.map(LIKERT))
     answered = numeric.notna().sum(axis=1)
     keep = (answered > 0).values
@@ -95,7 +94,7 @@ def build_network():
     features = numeric[keep].to_numpy(dtype=float)
     respondent_ids = df["id. Response ID"].values[keep]
 
-    # Step 2 of construction.ipynb: pairwise-complete Pearson, thresholded
+    # Similarity: pairwise-complete Pearson, thresholded at TAU
     sim_matrix = (pd.DataFrame(features.T)
                   .corr(method="pearson", min_periods=MIN_OVERLAP)
                   .to_numpy())
@@ -106,14 +105,12 @@ def build_network():
     G = nx.relabel_nodes(G, {i: respondent_ids[i] for i in range(len(respondent_ids))})
     G.remove_nodes_from(list(nx.isolates(G)))
 
-    print(f"Reproduced network: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges "
+    print(f"Network built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges "
           f"(tau = {TAU})")
     print(f"Feature matrix: {features.shape[0]} respondents x {features.shape[1]} questions")
     if (G.number_of_nodes(), G.number_of_edges()) != (88, 957):
-        print("  WARNING: construction diverges from construction.ipynb Step 2 "
-              "- re-sync before interpreting results below.")
-    else:
-        print("Matches construction.ipynb Step 2.")
+        print("  WARNING: result differs from the documented 88 nodes / 957 edges "
+              "- check the dataset and policy before interpreting results below.")
 
     return df, survey_cols, features, respondent_ids, sim_matrix, G
 

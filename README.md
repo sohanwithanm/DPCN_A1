@@ -52,7 +52,7 @@ This project builds **two networks from the same survey**, kept in separate fold
 | `respondent_network/` | Survey respondents | Two respondents whose answer patterns correlate at r >= 0.40 |
 | `question_network/` | Survey questions | (in progress) |
 
-Each folder contains a `construction.ipynb` (how the network is built), a single script (`respondent.py`) that reproduces the construction and runs the full analysis, a `RESULTS.md` (write-up), and a `figures/` directory. The shared dataset `Survey_Results_UC.csv` lives at the repository root.
+Each folder contains a `construction.ipynb` (how the network is built), a single script (`respondent.py`) that reproduces the construction and runs the full analysis, and a `RESULTS.md` (write-up); figures and tables are written to `outputs/<network>/`. The shared dataset `Survey_Results_UC.csv` lives at the repository root.
 
 With the environment active, run an analysis from the project root:
 
@@ -61,7 +61,7 @@ python respondent_network/respondent.py
 
 ```
 
-It prints every metric to the terminal and writes the five figures to `respondent_network/figures/`. The narrative interpretation of the results is in `respondent_network/RESULTS.md`.
+It prints every metric to the terminal and writes the five figures to `outputs/respondent_network/`. The narrative interpretation of the results is in `respondent_network/RESULTS.md`.
 
 If you get a `ModuleNotFoundError`, the wrong Python is being used — check with `which python` (macOS/Linux) or `where python` (Windows) that it points inside `.venv`.
 
